@@ -504,6 +504,10 @@ export interface FullUiCopy {
     cooldownState: string;
     invalidState: string;
     zeroCostFallbackNote: string;
+    autoBestBadge: string;
+    autoSwitchesLabel: string;
+    lastBenchmarkLabel: string;
+    autoBenchmarkActiveBadge: string;
   };
   settings: {
     title: string;
@@ -812,6 +816,10 @@ export const FULL_UI_COPY: Record<SupportedLang, FullUiCopy> = {
       cooldownState: 'Cooldown',
       invalidState: 'Invalid',
       zeroCostFallbackNote: 'Running in 100% free keyless mode (local deterministic correlator + open public OSINT feeds).',
+      autoBestBadge: 'Auto-Best',
+      autoSwitchesLabel: 'Auto-Switches',
+      lastBenchmarkLabel: 'Last Auto-Check',
+      autoBenchmarkActiveBadge: 'Auto Health Check & Best Switch Active',
     },
     settings: {
       title: 'Platform Settings & Local-First Personalization',
@@ -1118,6 +1126,10 @@ export const FULL_UI_COPY: Record<SupportedLang, FullUiCopy> = {
       cooldownState: 'Pause',
       invalidState: 'Invalide',
       zeroCostFallbackNote: 'Fonctionnement 100% gratuit sans clé (corrélateur déterministe local + flux OSINT ouverts).',
+      autoBestBadge: 'Meilleur Auto',
+      autoSwitchesLabel: 'Bascules Auto',
+      lastBenchmarkLabel: 'Dernier Contrôle Auto',
+      autoBenchmarkActiveBadge: 'Contrôle & Bascule Auto Actifs',
     },
     settings: {
       title: 'Paramètres & Personnalisation Locale',
@@ -1424,6 +1436,10 @@ export const FULL_UI_COPY: Record<SupportedLang, FullUiCopy> = {
       cooldownState: 'تهدئة مؤقتة',
       invalidState: 'غير صالح',
       zeroCostFallbackNote: 'يعمل التطبيق الآن بالوضع المجاني الكامل بدون مفاتيح (المحرك التحليلي المحلي + المصادر المفتوحة).',
+      autoBestBadge: 'الأفضل تلقائياً',
+      autoSwitchesLabel: 'التبديل التلقائي للأفضل',
+      lastBenchmarkLabel: 'آخر فحص تلقائي',
+      autoBenchmarkActiveBadge: 'الفحص والتبديل التلقائي للأفضل نشط',
     },
     settings: {
       title: 'إعدادات المنصة والتخصيص المحلي',

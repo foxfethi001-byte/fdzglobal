@@ -130,18 +130,36 @@ export interface KeyPoolSlotStatus {
   cooldownRemainingSec: number;
   successCount: number;
   errorCount: number;
+  lastLatencyMs: number | null;
+  avgLatencyMs: number | null;
+  healthScore: number;
+  isBest: boolean;
   lastUsedAt: string | null;
+  lastCheckedAt: string | null;
   lastError?: string;
+}
+
+export interface MirrorCandidateStatus {
+  id: string;
+  label: string;
+  healthy: boolean;
+  latencyMs: number | null;
+  score: number;
+  isBest: boolean;
+  lastCheckedAt: string | null;
 }
 
 export interface FreeProviderMirrorStatus {
   id: string;
   name: string;
   activeEndpoint: string;
+  bestEndpointId: string;
+  activeLatencyMs: number | null;
   mirrorCount: number;
   failoverCount: number;
   requiresKey: false;
   lastUpdatedAt: string | null;
+  candidates: MirrorCandidateStatus[];
 }
 
 export interface KeyRotationSummary {
@@ -156,13 +174,17 @@ export interface KeyRotationSummary {
   cooldownCount: number;
   invalidCount: number;
   rotationCount: number;
+  autoSwitchCount: number;
   reloadCount: number;
   firmsKeyConfigured: boolean;
   openSkyAuthConfigured: boolean;
   lastReloadAt: string;
   lastRotationAt: string | null;
+  lastAutoBenchmarkAt: string | null;
   nextAutoSyncAt: string;
   autoSyncIntervalSec: number;
+  autoBenchmarkIntervalSec: number;
+  autoBenchmarkActive: boolean;
   slots: KeyPoolSlotStatus[];
   mirrors: FreeProviderMirrorStatus[];
 }

@@ -156,6 +156,7 @@ export async function generateIntelligenceBriefing(params: {
   for (const candidate of candidates) {
     const ai = buildGeminiClient(candidate.key);
     for (const modelName of FREE_GEMINI_MODELS) {
+      const callStarted = performance.now();
       try {
         const response = await ai.models.generateContent({
           model: modelName,
@@ -190,7 +191,7 @@ export async function generateIntelligenceBriefing(params: {
           },
         });
 
-        keyManager.markGeminiSuccess(candidate.slotIndex);
+        keyManager.markGeminiSuccess(candidate.slotIndex, Math.round(performance.now() - callStarted));
         keyManager.recordMirrorUpdate('ai', `${modelName} (${candidate.sourceVar})`, modelName !== FREE_GEMINI_MODELS[0]);
 
         const parsed = JSON.parse((response.text ?? '{}').trim()) as {
@@ -237,12 +238,13 @@ export async function generateIntelligenceBriefing(params: {
           disclaimer: 'AI-generated analytical synthesis grounded in retrieved WIH open-source records. Not an independent confirmation of unverified claims.',
         };
       } catch (err) {
+        const lat = Math.round(performance.now() - callStarted);
         lastErrorMsg = err instanceof Error ? err.message : 'Gemini request failed';
         const isModelMissing = /(NOT_FOUND|404)/i.test(lastErrorMsg);
         if (isModelMissing && modelName !== FREE_GEMINI_MODELS[FREE_GEMINI_MODELS.length - 1]) {
           continue;
         }
-        keyManager.markGeminiError(candidate.slotIndex, lastErrorMsg);
+        keyManager.markGeminiError(candidate.slotIndex, lastErrorMsg, lat);
         break; // Rotate to next available key slot immediately
       }
     }

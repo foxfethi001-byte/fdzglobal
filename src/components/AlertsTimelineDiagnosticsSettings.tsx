@@ -745,12 +745,19 @@ export const DiagnosticsView: React.FC<{
       {/* 100% Free-Tier & Continuous Server Key/Mirror Sync Telemetry (Read-Only, Zero Secrets) */}
       <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-4 space-y-3 text-xs">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="font-semibold text-emerald-700 dark:text-emerald-300">
-            {t.diagnostics.freeTierBadge}
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-semibold text-emerald-700 dark:text-emerald-300">
+              {t.diagnostics.freeTierBadge}
+            </span>
+            {keyRotation?.autoBenchmarkActive && (
+              <span className="rounded bg-cyan-500/15 px-2 py-0.5 text-[10px] font-medium text-cyan-700 dark:text-cyan-300">
+                {t.diagnostics.autoBenchmarkActiveBadge}
+              </span>
+            )}
           </div>
           {keyRotation && (
             <div className="font-mono text-[11px] text-slate-600 dark:text-slate-300" dir="ltr">
-              {t.diagnostics.autoSyncEveryLabel}: {keyRotation.autoSyncIntervalSec}s · {t.diagnostics.rotationsLabel}: {keyRotation.rotationCount}
+              {t.diagnostics.autoSyncEveryLabel}: {keyRotation.autoBenchmarkIntervalSec ?? keyRotation.autoSyncIntervalSec}s · {t.diagnostics.autoSwitchesLabel}: {keyRotation.autoSwitchCount ?? keyRotation.rotationCount}
             </div>
           )}
         </div>
@@ -776,7 +783,8 @@ export const DiagnosticsView: React.FC<{
                   </span>
                 </div>
                 <div className="font-mono" dir="ltr">
-                  {t.diagnostics.lastReloadLabel}: {keyRotation.lastReloadAt.replace('T', ' ').slice(0, 19)}Z
+                  {t.diagnostics.lastBenchmarkLabel}:{' '}
+                  {(keyRotation.lastAutoBenchmarkAt ?? keyRotation.lastReloadAt).replace('T', ' ').slice(0, 19)}Z
                 </div>
               </div>
               {keyRotation.slots.length === 0 ? (
@@ -785,31 +793,52 @@ export const DiagnosticsView: React.FC<{
                 </div>
               ) : (
                 <div className="space-y-1.5">
-                  {keyRotation.slots.map((slot) => (
-                    <div
-                      key={`${slot.sourceVar}-${slot.slotIndex}`}
-                      className="flex items-center justify-between gap-2 rounded border border-slate-200 dark:border-slate-800 px-2.5 py-1.5 text-[11px]"
-                    >
-                      <span className="font-mono text-slate-800 dark:text-slate-200" dir="ltr">
-                        {t.diagnostics.slotLabel} #{slot.slotIndex + 1} · {slot.sourceVar}
-                      </span>
-                      <span
-                        className={`font-semibold ${
-                          slot.status === 'ready'
-                            ? 'text-emerald-500'
-                            : slot.status === 'cooldown'
-                            ? 'text-amber-500'
-                            : 'text-rose-500'
+                  {keyRotation.slots.map((slot) => {
+                    const lat = slot.avgLatencyMs ?? slot.lastLatencyMs;
+                    return (
+                      <div
+                        key={`${slot.sourceVar}-${slot.slotIndex}`}
+                        className={`flex items-center justify-between gap-2 rounded border px-2.5 py-1.5 text-[11px] ${
+                          slot.isBest
+                            ? 'border-emerald-500/40 bg-emerald-500/5'
+                            : 'border-slate-200 dark:border-slate-800'
                         }`}
                       >
-                        {slot.status === 'ready'
-                          ? t.diagnostics.readyState
-                          : slot.status === 'cooldown'
-                          ? `${t.diagnostics.cooldownState} (${slot.cooldownRemainingSec}s)`
-                          : t.diagnostics.invalidState}
-                      </span>
-                    </div>
-                  ))}
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span className="font-mono text-slate-800 dark:text-slate-200 truncate" dir="ltr">
+                            {t.diagnostics.slotLabel} #{slot.slotIndex + 1} · {slot.sourceVar}
+                          </span>
+                          {slot.isBest && (
+                            <span className="rounded bg-emerald-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-600 dark:text-emerald-300 shrink-0">
+                              {t.diagnostics.autoBestBadge}
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0 font-mono">
+                          {lat !== null && lat !== undefined && (
+                            <span className="text-[10px] text-slate-500" dir="ltr">
+                              {lat}ms
+                            </span>
+                          )}
+                          <span
+                            className={`font-sans font-semibold ${
+                              slot.status === 'ready'
+                                ? 'text-emerald-500'
+                                : slot.status === 'cooldown'
+                                ? 'text-amber-500'
+                                : 'text-rose-500'
+                            }`}
+                          >
+                            {slot.status === 'ready'
+                              ? t.diagnostics.readyState
+                              : slot.status === 'cooldown'
+                              ? `${t.diagnostics.cooldownState} (${slot.cooldownRemainingSec}s)`
+                              : t.diagnostics.invalidState}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -823,15 +852,42 @@ export const DiagnosticsView: React.FC<{
                 {keyRotation.mirrors.map((m) => (
                   <div
                     key={m.id}
-                    className="rounded border border-slate-200 dark:border-slate-800 px-2.5 py-2 text-[11px] space-y-0.5"
+                    className="rounded border border-slate-200 dark:border-slate-800 px-2.5 py-2 text-[11px] space-y-1.5"
                   >
                     <div className="flex items-center justify-between gap-1">
-                      <span className="font-semibold text-slate-900 dark:text-slate-100">{m.name}</span>
-                      <span className="text-[10px] font-mono text-emerald-500">{t.diagnostics.noKeyNeededBadge}</span>
+                      <span className="font-semibold text-slate-900 dark:text-slate-100 truncate">{m.name}</span>
+                      <span className="text-[10px] font-mono text-emerald-500 shrink-0">{t.diagnostics.noKeyNeededBadge}</span>
                     </div>
-                    <div className="text-slate-500 truncate" dir="ltr">
-                      {m.activeEndpoint}
+                    <div className="flex items-center justify-between gap-2 text-slate-500 font-mono text-[10px]" dir="ltr">
+                      <span className="truncate text-cyan-600 dark:text-cyan-400 font-semibold">{m.activeEndpoint}</span>
+                      <span>{m.activeLatencyMs !== null ? `${m.activeLatencyMs}ms` : '—'}</span>
                     </div>
+                    {m.candidates && m.candidates.length > 0 && (
+                      <div className="space-y-1 pt-1 border-t border-slate-200/70 dark:border-slate-800/70">
+                        {m.candidates.map((c) => (
+                          <div key={c.id} className="flex items-center justify-between gap-1.5 text-[10px] font-mono" dir="ltr">
+                            <span className="flex items-center gap-1.5 min-w-0 truncate text-slate-600 dark:text-slate-300">
+                              <span
+                                className={`inline-block w-1.5 h-1.5 rounded-full shrink-0 ${
+                                  c.healthy ? 'bg-emerald-500' : 'bg-rose-500'
+                                }`}
+                              />
+                              <span className="truncate">{c.label}</span>
+                            </span>
+                            <span className="flex items-center gap-1.5 shrink-0">
+                              {c.isBest && (
+                                <span className="font-sans rounded bg-emerald-500/15 px-1 py-0.2 text-[9px] font-semibold text-emerald-600 dark:text-emerald-300">
+                                  {t.diagnostics.autoBestBadge}
+                                </span>
+                              )}
+                              <span className="text-slate-400">
+                                {c.latencyMs !== null ? `${c.latencyMs}ms` : '—'}
+                              </span>
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                     <div className="font-mono text-[10px] text-slate-400" dir="ltr">
                       {t.diagnostics.failoversLabel}: {m.failoverCount} · Mirrors: {m.mirrorCount}
                     </div>

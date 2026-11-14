@@ -77,17 +77,24 @@ app.get('/api/diagnostics', (_req, res) => {
   });
 });
 
-app.post('/api/diagnostics/refresh-keys', (_req, res) => {
-  const keyRotation = keyManager.forceRefreshAndRotate();
-  clearServerCache();
-  res.json({
-    ok: true,
-    refreshedAt: new Date().toISOString(),
-    aiConfigured: isGeminiConfigured(),
-    keyRotation,
-    sources: getAllSourceHealth(),
-    endpoints: getAllEndpointDiagnostics(),
-  });
+app.post('/api/diagnostics/refresh-keys', async (_req, res) => {
+  try {
+    const keyRotation = await keyManager.forceRefreshAndRotate();
+    clearServerCache();
+    res.json({
+      ok: true,
+      refreshedAt: new Date().toISOString(),
+      aiConfigured: isGeminiConfigured(),
+      keyRotation,
+      sources: getAllSourceHealth(),
+      endpoints: getAllEndpointDiagnostics(),
+    });
+  } catch (err) {
+    res.status(500).json({
+      ok: false,
+      error: err instanceof Error ? err.message : 'Key & mirror benchmark failed',
+    });
+  }
 });
 
 app.post('/api/diagnostics/probe', async (_req, res) => {
@@ -346,9 +353,79 @@ async function startServer() {
 
   if (!isProd) {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: false,
+        ws: false,
+      },
       appType: 'spa',
     });
+
+    // HMR is disabled in AI Studio; serve a clean zero-WebSocket @vite/client module
+    // so CSS injection (updateStyle/removeStyle) and import.meta.hot stubs work without WS failures.
+    app.get('/@vite/client', (_req, res) => {
+      res.type('application/javascript').send(`
+const sheetsMap = new Map();
+let lastInsertedStyle;
+export function updateStyle(id, content) {
+  let style = sheetsMap.get(id);
+  if (!style) {
+    style = document.createElement('style');
+    style.setAttribute('type', 'text/css');
+    style.setAttribute('data-vite-dev-id', id);
+    style.textContent = content;
+    if (!lastInsertedStyle) {
+      document.head.appendChild(style);
+      setTimeout(() => { lastInsertedStyle = undefined; }, 0);
+    } else {
+      lastInsertedStyle.insertAdjacentElement('afterend', style);
+    }
+    lastInsertedStyle = style;
+  } else if (style.textContent !== content) {
+    style.textContent = content;
+  }
+  sheetsMap.set(id, style);
+}
+export function removeStyle(id) {
+  const style = sheetsMap.get(id);
+  if (style) {
+    style.remove();
+    sheetsMap.delete(id);
+  }
+}
+export function createHotContext() {
+  const noop = () => {};
+  return {
+    data: {},
+    accept: noop,
+    acceptExports: noop,
+    dispose: noop,
+    prune: noop,
+    decline: noop,
+    invalidate: noop,
+    on: noop,
+    off: noop,
+    send: noop,
+  };
+}
+export function injectQuery(url, queryToInject) {
+  if (url[0] !== '.' && url[0] !== '/') return url;
+  const pathname = url.replace(/[?#].*$/, '');
+  const { search, hash } = new URL(url, 'http://vite.dev');
+  return pathname + '?' + queryToInject + (search ? '&' + search.slice(1) : '') + (hash || '');
+}
+export class ErrorOverlay extends HTMLElement {
+  constructor(err) {
+    super();
+    this.err = err;
+  }
+}
+if (typeof customElements !== 'undefined' && !customElements.get('vite-error-overlay')) {
+  customElements.define('vite-error-overlay', ErrorOverlay);
+}
+`);
+    });
+
     app.use(vite.middlewares);
   } else {
     const distDir = path.resolve(process.cwd(), 'dist');
@@ -362,7 +439,8 @@ async function startServer() {
     console.log(`World Intelligence Hub listening on http://0.0.0.0:${PORT}`);
 
     // Continuous API key / .env hot-reload & cooldown recovery scheduler
-    const keySyncMs = keyManager.getSummary().autoSyncIntervalSec * 1000;
+    const summaryInit = keyManager.getSummary();
+    const keySyncMs = summaryInit.autoSyncIntervalSec * 1000;
     const keyTimer = setInterval(() => {
       const changed = keyManager.syncFromEnvironment(false);
       if (changed) {
@@ -370,6 +448,18 @@ async function startServer() {
       }
     }, keySyncMs);
     keyTimer.unref?.();
+
+    // Automatic non-blocking server mirror & key benchmark (boot check + periodic best-first auto-switch)
+    const bootBenchmarkTimer = setTimeout(() => {
+      keyManager.runAutomaticServerAndKeyCheck().catch(() => {});
+    }, 1500);
+    bootBenchmarkTimer.unref?.();
+
+    const benchmarkMs = summaryInit.autoBenchmarkIntervalSec * 1000;
+    const benchmarkTimer = setInterval(() => {
+      keyManager.runAutomaticServerAndKeyCheck().catch(() => {});
+    }, benchmarkMs);
+    benchmarkTimer.unref?.();
 
     // Background free-tier feed warm-up & continuous cache refresh every 5 minutes
     const bgFeedTimer = setInterval(() => {

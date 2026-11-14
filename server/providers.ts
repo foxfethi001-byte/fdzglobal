@@ -360,24 +360,46 @@ export async function fetchNasaFirmsWildfires(): Promise<IntelEvent[]> {
   const { data } = await cachedFetch(cacheKey, 900_000, async () => {
     const started = Date.now();
     updateSourceHealth('firms', { lastAttemptAt: nowIso() });
-    let activeUrl = keyedCsvUrl ?? publicCsvUrl;
+    const rankedFirms = keyManager.getRankedMirrors('firms');
+    const orderedMirrors = (rankedFirms.length > 0 ? rankedFirms : [{ id: 'firms_public', label: 'NASA FIRMS MODIS Public CSV' }])
+      .map((m) => ({
+        id: m.id,
+        label: m.label,
+        url: m.id === 'firms_keyed' && keyedCsvUrl ? keyedCsvUrl : publicCsvUrl,
+      }));
+
+    let activeUrl = orderedMirrors[0]?.url ?? publicCsvUrl;
+    let res: Response | null = null;
+    let lastStatus = 502;
+    let lastErrMsg = 'FIRMS fetch error';
+
     try {
-      let res = await throttledFetch('firms', 2000, activeUrl, 11_000);
-      if (!res.ok && keyedCsvUrl) {
-        recordSourceError('firms', `FIRMS keyed endpoint HTTP ${res.status}; falling back to public CSV`, res.status, keyedCsvUrl);
-        activeUrl = publicCsvUrl;
-        res = await throttledFetch('firms', 2000, publicCsvUrl, 11_000);
-        keyManager.recordMirrorUpdate('firms', 'NASA FIRMS MODIS Public CSV (Failover)', true);
-      } else {
-        keyManager.recordMirrorUpdate(
-          'firms',
-          activeUrl === keyedCsvUrl ? 'NASA FIRMS Keyed API' : 'NASA FIRMS MODIS C6.1 Public 24h CSV',
-          false
-        );
+      for (const m of orderedMirrors) {
+        activeUrl = m.url;
+        const attemptStart = Date.now();
+        try {
+          const r = await throttledFetch('firms', 2000, m.url, 11_000);
+          const lat = Date.now() - attemptStart;
+          if (r.ok) {
+            keyManager.recordMirrorResult('firms', m.id, true, lat);
+            res = r;
+            break;
+          }
+          lastStatus = r.status;
+          lastErrMsg = `HTTP ${r.status}`;
+          keyManager.recordMirrorResult('firms', m.id, false, lat);
+          recordSourceError('firms', `${m.label} HTTP ${r.status}`, r.status, m.url);
+        } catch (attemptErr) {
+          const lat = Date.now() - attemptStart;
+          lastErrMsg = attemptErr instanceof Error ? attemptErr.message : 'FIRMS fetch error';
+          keyManager.recordMirrorResult('firms', m.id, false, lat);
+          recordSourceError('firms', `${m.label}: ${lastErrMsg}`, null, m.url);
+        }
       }
-      if (!res.ok) {
-        recordSourceError('firms', `HTTP ${res.status}`, res.status, activeUrl);
-        throw new Error(`HTTP ${res.status}`);
+
+      if (!res || !res.ok) {
+        recordSourceError('firms', lastErrMsg, lastStatus, activeUrl);
+        throw new Error(lastErrMsg);
       }
       const csv = await res.text();
       const lines = csv.split('\n');
@@ -900,123 +922,147 @@ export async function fetchAviationTracks(bbox?: { lamin: number; lomin: number;
 
     const openSkyUrl = `https://opensky-network.org/api/states/all?lamin=${b.lamin}&lomin=${b.lomin}&lamax=${b.lamax}&lomax=${b.lomax}`;
     const openSkyAuth = keyManager.getOptionalOpenSkyAuthHeader();
-    try {
-      const res = await throttledFetch(
-        'opensky',
-        10_000,
-        openSkyUrl,
-        7500,
-        openSkyAuth ? { Authorization: openSkyAuth } : undefined
-      );
-      if (res.ok) {
-        const json = (await res.json()) as { time: number; states: Array<Array<string | number | boolean | null>> | null };
-        const tracks: AircraftTrack[] = [];
-        for (const s of (json.states ?? []).slice(0, 120)) {
-          const coords = normalizeCoordinates(s[6], s[5]);
-          if (!coords) continue;
-          tracks.push({
-            icao24: String(s[0] ?? ''),
-            callsign: String(s[1] ?? '').trim() || 'N/A',
-            originCountry: String(s[2] ?? 'Unknown'),
-            lon: coords.lon,
-            lat: coords.lat,
-            altitudeM: typeof s[7] === 'number' ? Math.round(s[7]) : null,
-            velocityMs: typeof s[9] === 'number' ? Math.round(s[9]) : null,
-            headingDeg: typeof s[10] === 'number' ? Math.round(s[10]) : null,
-            onGround: Boolean(s[8]),
-            lastContact: new Date(((typeof s[4] === 'number' ? s[4] : json.time) || Date.now() / 1000) * 1000).toISOString(),
-            source: 'OpenSky Network',
-          });
-        }
-        keyManager.recordMirrorUpdate('aviation', openSkyAuth ? 'OpenSky Network (Free Account)' : 'OpenSky Network Public', false);
-        updateSourceHealth('aviation', {
-          status: 'operational',
-          lastSuccessAt: nowIso(),
-          lastStatusCode: res.status,
-          itemCount: tracks.length,
-          latencyMs: Date.now() - started,
-          errorMessage: undefined,
-        });
-        return { tracks, status: 'operational' as const, sourceNote: 'Live OpenSky Network REST API (100% free public feed).' };
-      }
-      recordSourceError('aviation', `OpenSky HTTP ${res.status}`, res.status, openSkyUrl);
-      throw new Error(`OpenSky HTTP ${res.status}`);
-    } catch (openSkyErr) {
-      const openSkyMsg = openSkyErr instanceof Error ? openSkyErr.message : 'timeout';
-      recordSourceError('aviation', `OpenSky: ${openSkyMsg}`, null, openSkyUrl);
-      const centerLat = Number(((b.lamin + b.lamax) / 2).toFixed(2));
-      const centerLon = Number(((b.lomin + b.lomax) / 2).toFixed(2));
-      const adsbMirrors = [
-        {
-          label: 'adsb.lol Community Regional ADS-B (Free Keyless)',
-          url: `https://api.adsb.lol/v2/lat/${centerLat}/lon/${centerLon}/dist/250`,
-        },
-        {
-          label: 'adsb.lol Community Global Feed (Free Keyless)',
-          url: 'https://api.adsb.lol/v2/mil',
-        },
-      ];
+    const centerLat = Number(((b.lamin + b.lamax) / 2).toFixed(2));
+    const centerLon = Number(((b.lomin + b.lomax) / 2).toFixed(2));
 
-      for (const mirror of adsbMirrors) {
+    const ranked = keyManager.getRankedMirrors('aviation');
+    const orderedIds = ranked.length > 0 ? ranked.map((m) => m.id) : ['opensky', 'adsb_regional', 'adsb_mil'];
+    let lastErrorSummary = 'Upstream unavailable';
+
+    for (let idx = 0; idx < orderedIds.length; idx++) {
+      const candidateId = orderedIds[idx];
+      const attemptStart = Date.now();
+
+      if (candidateId === 'opensky') {
         try {
-          const res2 = await throttledFetch('adsblol', 4000, mirror.url, 7500);
-          if (res2.ok) {
-            const json2 = (await res2.json()) as {
-              ac?: Array<{ hex: string; flight?: string; lat?: number; lon?: number; alt_baro?: number | string; gs?: number; track?: number; r?: string }>;
-            };
-            const tracks: AircraftTrack[] = [];
-            for (const a of (json2.ac ?? []).slice(0, 120)) {
-              const coords = normalizeCoordinates(a.lat, a.lon);
-              if (!coords) continue;
-              tracks.push({
-                icao24: a.hex,
-                callsign: (a.flight ?? a.r ?? a.hex).trim(),
-                originCountry: 'ADS-B Community',
-                lon: coords.lon,
-                lat: coords.lat,
-                altitudeM: typeof a.alt_baro === 'number' ? Math.round(a.alt_baro * 0.3048) : null,
-                velocityMs: typeof a.gs === 'number' ? Math.round(a.gs * 0.514444) : null,
-                headingDeg: typeof a.track === 'number' ? Math.round(a.track) : null,
-                onGround: a.alt_baro === 'ground',
-                lastContact: nowIso(),
-                source: mirror.label,
-              });
-            }
-            if (tracks.length === 0 && mirror !== adsbMirrors[adsbMirrors.length - 1]) {
-              continue;
-            }
-            keyManager.recordMirrorUpdate('aviation', mirror.label, true);
-            updateSourceHealth('aviation', {
-              status: 'degraded',
-              lastSuccessAt: nowIso(),
-              lastStatusCode: res2.status,
-              itemCount: tracks.length,
-              latencyMs: Date.now() - started,
-              errorMessage: `OpenSky unreachable (${openSkyMsg}); automatically switched to free keyless ${mirror.label}.`,
-            });
-            return {
-              tracks,
-              status: 'degraded' as const,
-              sourceNote: `OpenSky rate-limited/unreachable (${openSkyMsg}); switched automatically to free keyless ${mirror.label}.`,
-            };
+          const res = await throttledFetch(
+            'opensky',
+            10_000,
+            openSkyUrl,
+            7500,
+            openSkyAuth ? { Authorization: openSkyAuth } : undefined
+          );
+          const lat = Date.now() - attemptStart;
+          if (!res.ok) {
+            lastErrorSummary = `OpenSky HTTP ${res.status}`;
+            keyManager.recordMirrorResult('aviation', 'opensky', false, lat);
+            recordSourceError('aviation', lastErrorSummary, res.status, openSkyUrl);
+            continue;
           }
-          recordSourceError('aviation', `${mirror.label} HTTP ${res2.status}`, res2.status, mirror.url);
+          const json = (await res.json()) as { time: number; states: Array<Array<string | number | boolean | null>> | null };
+          const tracks: AircraftTrack[] = [];
+          for (const s of (json.states ?? []).slice(0, 120)) {
+            const coords = normalizeCoordinates(s[6], s[5]);
+            if (!coords) continue;
+            tracks.push({
+              icao24: String(s[0] ?? ''),
+              callsign: String(s[1] ?? '').trim() || 'N/A',
+              originCountry: String(s[2] ?? 'Unknown'),
+              lon: coords.lon,
+              lat: coords.lat,
+              altitudeM: typeof s[7] === 'number' ? Math.round(s[7]) : null,
+              velocityMs: typeof s[9] === 'number' ? Math.round(s[9]) : null,
+              headingDeg: typeof s[10] === 'number' ? Math.round(s[10]) : null,
+              onGround: Boolean(s[8]),
+              lastContact: new Date(((typeof s[4] === 'number' ? s[4] : json.time) || Date.now() / 1000) * 1000).toISOString(),
+              source: 'OpenSky Network',
+            });
+          }
+          keyManager.recordMirrorResult('aviation', 'opensky', true, lat);
+          updateSourceHealth('aviation', {
+            status: 'operational',
+            lastSuccessAt: nowIso(),
+            lastStatusCode: res.status,
+            itemCount: tracks.length,
+            latencyMs: Date.now() - started,
+            errorMessage: undefined,
+          });
+          return { tracks, status: 'operational' as const, sourceNote: 'Live OpenSky Network REST API (100% free public feed).' };
+        } catch (err) {
+          const lat = Date.now() - attemptStart;
+          lastErrorSummary = `OpenSky: ${err instanceof Error ? err.message : 'timeout'}`;
+          keyManager.recordMirrorResult('aviation', 'opensky', false, lat);
+          recordSourceError('aviation', lastErrorSummary, null, openSkyUrl);
+        }
+      } else {
+        const isGlobal = candidateId === 'adsb_mil';
+        const label = isGlobal
+          ? 'adsb.lol Global (Keyless)'
+          : 'adsb.lol Regional (Keyless)';
+        const mirrorUrl = isGlobal
+          ? 'https://api.adsb.lol/v2/mil'
+          : `https://api.adsb.lol/v2/lat/${centerLat}/lon/${centerLon}/dist/250`;
+
+        try {
+          const res2 = await throttledFetch('adsblol', 1500, mirrorUrl, 7500);
+          const lat = Date.now() - attemptStart;
+          if (!res2.ok) {
+            lastErrorSummary = `${label} HTTP ${res2.status}`;
+            keyManager.recordMirrorResult('aviation', candidateId, false, lat);
+            recordSourceError('aviation', lastErrorSummary, res2.status, mirrorUrl);
+            continue;
+          }
+          const json2 = (await res2.json()) as {
+            ac?: Array<{ hex: string; flight?: string; lat?: number; lon?: number; alt_baro?: number | string; gs?: number; track?: number; r?: string }>;
+          };
+          const tracks: AircraftTrack[] = [];
+          for (const a of (json2.ac ?? []).slice(0, 120)) {
+            const coords = normalizeCoordinates(a.lat, a.lon);
+            if (!coords) continue;
+            tracks.push({
+              icao24: a.hex,
+              callsign: (a.flight ?? a.r ?? a.hex).trim(),
+              originCountry: 'ADS-B Community',
+              lon: coords.lon,
+              lat: coords.lat,
+              altitudeM: typeof a.alt_baro === 'number' ? Math.round(a.alt_baro * 0.3048) : null,
+              velocityMs: typeof a.gs === 'number' ? Math.round(a.gs * 0.514444) : null,
+              headingDeg: typeof a.track === 'number' ? Math.round(a.track) : null,
+              onGround: a.alt_baro === 'ground',
+              lastContact: nowIso(),
+              source: label,
+            });
+          }
+          keyManager.recordMirrorResult('aviation', candidateId, true, lat);
+          if (tracks.length === 0 && idx < orderedIds.length - 1) {
+            continue;
+          }
+          const openSkyHealthy = ranked.find((r) => r.id === 'opensky')?.healthy ?? false;
+          const nextStatus: 'operational' | 'degraded' = openSkyHealthy ? 'operational' : 'degraded';
+          updateSourceHealth('aviation', {
+            status: nextStatus,
+            lastSuccessAt: nowIso(),
+            lastStatusCode: res2.status,
+            itemCount: tracks.length,
+            latencyMs: Date.now() - started,
+            errorMessage: openSkyHealthy
+              ? undefined
+              : `Auto-switched to fastest healthy mirror: ${label} (${lat}ms).`,
+          });
+          return {
+            tracks,
+            status: nextStatus,
+            sourceNote: `Auto-selected best ADS-B mirror: ${label} (${lat}ms, 100% free keyless feed).`,
+          };
         } catch (fbErr) {
-          recordSourceError('aviation', `${mirror.label}: ${fbErr instanceof Error ? fbErr.message : 'error'}`, null, mirror.url);
+          const lat = Date.now() - attemptStart;
+          lastErrorSummary = `${label}: ${fbErr instanceof Error ? fbErr.message : 'error'}`;
+          keyManager.recordMirrorResult('aviation', candidateId, false, lat);
+          recordSourceError('aviation', lastErrorSummary, null, mirrorUrl);
         }
       }
-
-      updateSourceHealth('aviation', {
-        status: 'unavailable',
-        latencyMs: Date.now() - started,
-        errorMessage: `OpenSky & adsb.lol community feeds unreachable (${openSkyMsg}).`,
-      });
-      return {
-        tracks: [],
-        status: 'unavailable' as const,
-        sourceNote: `Aviation tracking unavailable: ${openSkyMsg}. Platform does not fabricate aircraft positions.`,
-      };
     }
+
+    updateSourceHealth('aviation', {
+      status: 'unavailable',
+      latencyMs: Date.now() - started,
+      errorMessage: `All ADS-B mirrors unreachable (${lastErrorSummary}).`,
+    });
+    return {
+      tracks: [],
+      status: 'unavailable' as const,
+      sourceNote: `Aviation tracking unavailable: ${lastErrorSummary}. Platform does not fabricate aircraft positions.`,
+    };
   });
   return data;
 }
@@ -1061,12 +1107,14 @@ export async function fetchMaritimeAisBaltic(): Promise<{
           source: 'Digitraffic Finland (CC-BY-4.0)',
         });
       }
+      const lat = Date.now() - started;
+      keyManager.recordMirrorResult('maritime', 'digitraffic', true, lat);
       updateSourceHealth('maritime_ais', {
         status: 'operational',
         lastSuccessAt: nowIso(),
         lastStatusCode: res.status,
         itemCount: vessels.length,
-        latencyMs: Date.now() - started,
+        latencyMs: lat,
         errorMessage: undefined,
       });
       return {
@@ -1075,11 +1123,13 @@ export async function fetchMaritimeAisBaltic(): Promise<{
         sourceNote: 'Live regional AIS telemetry from Digitraffic Finland (CC-BY-4.0). Coverage is strictly Baltic Sea / Northern Europe.',
       };
     } catch (err) {
+      const lat = Date.now() - started;
+      keyManager.recordMirrorResult('maritime', 'digitraffic', false, lat);
       const msg = err instanceof Error ? err.message : 'Digitraffic AIS error';
       recordSourceError('maritime_ais', msg, null, url);
       updateSourceHealth('maritime_ais', {
         status: 'unavailable',
-        latencyMs: Date.now() - started,
+        latencyMs: lat,
         errorMessage: msg,
       });
       return {
@@ -1110,17 +1160,28 @@ export async function fetchEconomicIndicators(): Promise<EconomicIndicator[]> {
       { id: 'nikkei', symbol: '^N225', name: 'Nikkei 225', category: 'index', unit: 'pts' },
     ];
 
+    const rankedYahoo = keyManager.getRankedMirrors('economy_yahoo');
+    const yahooMirrorIds = rankedYahoo.length > 0 ? rankedYahoo.map((m) => m.id) : ['yahoo_query1', 'yahoo_query2'];
+
     const quoteResults = await Promise.allSettled(
       yahooSymbols.map(async (q) => {
-        const mirrors = [
-          `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(q.symbol)}?interval=1d&range=5d`,
-          `https://query2.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(q.symbol)}?interval=1d&range=5d`,
-        ];
+        const mirrors = yahooMirrorIds.map((id) => ({
+          id,
+          url:
+            id === 'yahoo_query2'
+              ? `https://query2.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(q.symbol)}?interval=1d&range=5d`
+              : `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(q.symbol)}?interval=1d&range=5d`,
+        }));
         let lastErr: Error | null = null;
-        for (let mIdx = 0; mIdx < mirrors.length; mIdx++) {
+        for (const m of mirrors) {
+          const mStart = Date.now();
           try {
-            const res = await throttledFetch('yahoo', 200, mirrors[mIdx], 7000);
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const res = await throttledFetch('yahoo', 200, m.url, 7000);
+            const lat = Date.now() - mStart;
+            if (!res.ok) {
+              keyManager.recordMirrorResult('economy_yahoo', m.id, false, lat);
+              throw new Error(`HTTP ${res.status}`);
+            }
             const json = (await res.json()) as {
               chart?: {
                 result?: Array<{
@@ -1129,12 +1190,13 @@ export async function fetchEconomicIndicators(): Promise<EconomicIndicator[]> {
               };
             };
             const meta = json.chart?.result?.[0]?.meta;
-            if (!meta || typeof meta.regularMarketPrice !== 'number') throw new Error('No market price');
+            if (!meta || typeof meta.regularMarketPrice !== 'number') {
+              keyManager.recordMirrorResult('economy_yahoo', m.id, false, lat);
+              throw new Error('No market price');
+            }
+            keyManager.recordMirrorResult('economy_yahoo', m.id, true, lat);
             const prev = meta.chartPreviousClose ?? meta.regularMarketPrice;
             const changePct = prev ? ((meta.regularMarketPrice - prev) / prev) * 100 : 0;
-            if (mIdx > 0) {
-              keyManager.recordMirrorUpdate('economy', 'Yahoo query2 + Open-ER-API/Frankfurter', true);
-            }
             return {
               ...q,
               value: Number(meta.regularMarketPrice.toFixed(2)),
@@ -1149,6 +1211,7 @@ export async function fetchEconomicIndicators(): Promise<EconomicIndicator[]> {
               status: 'operational' as const,
             };
           } catch (err) {
+            keyManager.recordMirrorResult('economy_yahoo', m.id, false, Date.now() - mStart);
             lastErr = err instanceof Error ? err : new Error('Quote unavailable');
           }
         }
@@ -1178,9 +1241,9 @@ export async function fetchEconomicIndicators(): Promise<EconomicIndicator[]> {
       }
     });
 
-    // FX Rates from Open-ER-API with automatic free Frankfurter ECB mirror fallback
-    const fxUrl = 'https://open.er-api.com/v6/latest/USD';
-    const frankfurterUrl = 'https://api.frankfurter.dev/v1/latest?base=USD';
+    // FX Rates ranked dynamically between Open-ER-API and Frankfurter ECB
+    const rankedFx = keyManager.getRankedMirrors('economy_fx');
+    const fxOrder = rankedFx.length > 0 ? rankedFx.map((m) => m.id) : ['openerapi', 'frankfurter'];
     const fxPairs = [
       { code: 'EUR', name: 'USD / EUR' },
       { code: 'GBP', name: 'USD / GBP' },
@@ -1191,14 +1254,37 @@ export async function fetchEconomicIndicators(): Promise<EconomicIndicator[]> {
       { code: 'EGP', name: 'USD / EGP (Egyptian Pound)' },
       { code: 'SAR', name: 'USD / SAR (Saudi Riyal)' },
     ];
-    let fxLoaded = false;
-    try {
-      const fxRes = await throttledFetch('openerapi', 500, fxUrl, 7000);
-      if (fxRes.ok) {
-        const fx = (await fxRes.json()) as { time_last_update_unix?: number; rates?: Record<string, number> };
-        const obs = fx.time_last_update_unix ? new Date(fx.time_last_update_unix * 1000).toISOString() : collectedAt;
+
+    for (const fxId of fxOrder) {
+      const fxUrl = fxId === 'frankfurter'
+        ? 'https://api.frankfurter.dev/v1/latest?base=USD'
+        : 'https://open.er-api.com/v6/latest/USD';
+      const fxLabel = fxId === 'frankfurter' ? 'Frankfurter ECB Open Feed' : 'ExchangeRate-API Open Access';
+      const fxStart = Date.now();
+      try {
+        const fxRes = await throttledFetch(fxId, 500, fxUrl, 7000);
+        const lat = Date.now() - fxStart;
+        if (!fxRes.ok) {
+          keyManager.recordMirrorResult('economy_fx', fxId, false, lat);
+          recordSourceError('economy', `${fxLabel} HTTP ${fxRes.status}`, fxRes.status, fxUrl);
+          continue;
+        }
+        const fx = (await fxRes.json()) as {
+          time_last_update_unix?: number;
+          date?: string;
+          rates?: Record<string, number>;
+        };
+        if (!fx.rates) {
+          keyManager.recordMirrorResult('economy_fx', fxId, false, lat);
+          continue;
+        }
+        const obs = fx.time_last_update_unix
+          ? new Date(fx.time_last_update_unix * 1000).toISOString()
+          : fx.date
+          ? new Date(fx.date).toISOString()
+          : collectedAt;
         for (const p of fxPairs) {
-          const rate = fx.rates?.[p.code];
+          const rate = fx.rates[p.code];
           if (typeof rate === 'number') {
             indicators.push({
               id: `fx-${p.code.toLowerCase()}`,
@@ -1208,54 +1294,20 @@ export async function fetchEconomicIndicators(): Promise<EconomicIndicator[]> {
               value: Number(rate.toFixed(4)),
               unit: p.code,
               currency: p.code,
-              source: 'ExchangeRate-API Open Access',
-              sourceUrl: 'https://www.exchangerate-api.com/',
+              source: fxLabel,
+              sourceUrl: fxId === 'frankfurter' ? 'https://www.frankfurter.dev/' : 'https://www.exchangerate-api.com/',
               observedAt: obs,
               collectedAt,
-              updateFrequency: 'Daily reference rate',
+              updateFrequency: fxId === 'frankfurter' ? 'ECB Daily Reference' : 'Daily reference rate',
               status: 'operational',
             });
           }
         }
-        fxLoaded = true;
-        keyManager.recordMirrorUpdate('economy', 'Yahoo Finance + Open-ER-API', false);
-      } else {
-        recordSourceError('economy', `Open-ER-API HTTP ${fxRes.status}`, fxRes.status, fxUrl);
-      }
-    } catch (fxErr) {
-      recordSourceError('economy', `Open-ER-API: ${fxErr instanceof Error ? fxErr.message : 'failed'}`, null, fxUrl);
-    }
-
-    if (!fxLoaded) {
-      try {
-        const ffRes = await throttledFetch('frankfurter', 500, frankfurterUrl, 7000);
-        if (ffRes.ok) {
-          const ff = (await ffRes.json()) as { date?: string; rates?: Record<string, number> };
-          const obs = ff.date ? new Date(ff.date).toISOString() : collectedAt;
-          for (const p of fxPairs) {
-            const rate = ff.rates?.[p.code];
-            if (typeof rate === 'number') {
-              indicators.push({
-                id: `fx-${p.code.toLowerCase()}`,
-                symbol: `USD/${p.code}`,
-                name: p.name,
-                category: 'currency',
-                value: Number(rate.toFixed(4)),
-                unit: p.code,
-                currency: p.code,
-                source: 'Frankfurter ECB Open Feed (Failover)',
-                sourceUrl: 'https://www.frankfurter.dev/',
-                observedAt: obs,
-                collectedAt,
-                updateFrequency: 'ECB Daily Reference',
-                status: 'operational',
-              });
-            }
-          }
-          keyManager.recordMirrorUpdate('economy', 'Yahoo Finance + Frankfurter ECB (Failover)', true);
-        }
-      } catch (ffErr) {
-        recordSourceError('economy', `Frankfurter: ${ffErr instanceof Error ? ffErr.message : 'failed'}`, null, frankfurterUrl);
+        keyManager.recordMirrorResult('economy_fx', fxId, true, lat);
+        break;
+      } catch (fxErr) {
+        keyManager.recordMirrorResult('economy_fx', fxId, false, Date.now() - fxStart);
+        recordSourceError('economy', `${fxLabel}: ${fxErr instanceof Error ? fxErr.message : 'failed'}`, null, fxUrl);
       }
     }
 

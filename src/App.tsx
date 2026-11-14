@@ -524,6 +524,45 @@ export default function App() {
     return () => clearInterval(id);
   }, [prefs.refreshIntervalSec, range, syncFeeds]);
 
+  // Automatic background server & key health check + seamless auto-switch sync
+  useEffect(() => {
+    if (!prefsLoaded) return;
+    let cancelled = false;
+
+    const runAutoHealthCheck = async () => {
+      if (!navigator.onLine || document.visibilityState === 'hidden') return;
+      try {
+        const [pingReport, healthRes] = await Promise.all([
+          pingRegisteredEndpoints(5000),
+          fetch('/api/health').then((r) => (r.ok ? r.json() : null)).catch(() => null),
+        ]);
+        if (cancelled) return;
+        setEndpointPings(pingReport.pings);
+        if (pingReport.sources.length > 0) setSources(pingReport.sources);
+        if (pingReport.endpoints.length > 0) setEndpointDiagnostics(pingReport.endpoints);
+        setDegradedModules(pingReport.degradedModules);
+
+        if (healthRes && typeof healthRes === 'object') {
+          const h = healthRes as { keyRotation?: KeyRotationSummary; aiConfigured?: boolean };
+          if (h.keyRotation) setKeyRotation(h.keyRotation);
+          if (typeof h.aiConfigured === 'boolean') setAiConfigured(h.aiConfigured);
+        }
+      } catch {
+        // Silent degradation on transient network error
+      }
+    };
+
+    const bootTimer = setTimeout(runAutoHealthCheck, 3500);
+    const intervalMs = Math.max(90, prefs.refreshIntervalSec || 120) * 1000;
+    const periodicTimer = setInterval(runAutoHealthCheck, intervalMs);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(bootTimer);
+      clearInterval(periodicTimer);
+    };
+  }, [prefsLoaded, prefs.refreshIntervalSec]);
+
   // Fetch Aviation or Maritime live overlays if those layers are toggled visible on the map
   useEffect(() => {
     if (prefs.visibleLayers.includes('aviation') && aircraft.length === 0) {
