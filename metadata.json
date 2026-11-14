@@ -1,0 +1,6 @@
+{
+  "name": "World Intelligence Hub (WIH)",
+  "description": "Free, open-source global OSINT and geospatial intelligence monitoring platform with multi-source event correlation, transparent provenance, and optional Gemini analysis.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
